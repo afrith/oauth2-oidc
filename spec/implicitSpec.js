@@ -1,35 +1,38 @@
 'use strict';
 
-const urlParse = require('url-parse'),
-    debug = require('debug')('oauth2-oidc')
+const qs = require('url-parse').qs
 
 describe('implicit flow', function() {
-  let oidc
-
-  const state = () => oidc.options.state
+  let oidc, config
 
   beforeEach(function(done) {
-    getState()
-    .then(state => new OAuth2OIDC({ state, login_url: '/login' }))
-    .then(o => {
-      oidc = o
+    oidc = new OAuth2OIDC({ state: {}, login_url: '/login', })
+    buildTestConfig().then((c) => {
+      config = c
+      oidc.options.state = config.state
       done()
     })
-    .catch(err => { console.log('implicit flow, beforeEach, error', err); done(err) })
+  })
+
+  afterEach(function(done) {
+    config.state.connections.default._adapter.teardown(function(err) {
+      expect(err).toBeFalsy()
+      done()
+    })
   })
 
   describe('when client allows it', function() {
     let app, client, req
     beforeEach(function(done) {
-      Promise.resolve(buildAndSaveClient(state().collections, {
+      Promise.resolve(buildAndSaveClient(config.state.collections, {
         implicitFlow: true
       })).then((savedClient) => {
         client = savedClient
         done()
-      }).catch(err => done(err))
+      })
     })
     describe('on correct authorization request', function() {
-      const requestState = Math.random().toString()
+      const state = 'some-state'
       beforeEach(function(done) {
         req = createRequest({
           query: {
@@ -37,19 +40,20 @@ describe('implicit flow', function() {
             client_id: client.key,
             redirect_uri: client.redirect_uris[0],
             scope: client.scope.join(','),
-            state: requestState
+            state: state
           }
         })
         req.client = client
         req.session = {}
+        // req.state = config.state
         app = express()
         app.use(oidc._useState())
         app.use(oidc._authorize())
-        Promise.resolve(buildAndSaveUser(state().collections, { password: '123', passConfirm: '123' })).then((user) => {
-          req.session.user = user._id
+        Promise.resolve(buildAndSaveUser(config.state.collections, { password: '123', passConfirm: '123' })).then((user) => {
+          req.session.user = user
           done()
         }).catch((err) => {
-          debug('buildAndSaveUser, err', err)
+          console.log('buildAndSaveUser, err', err)
           throw err
         })
       })
@@ -60,12 +64,14 @@ describe('implicit flow', function() {
           expect(res.statusCode).toEqual(302)
           const url = res._getRedirectUrl()
           expect(url).toMatch(client.redirect_uris[0])
-          const queryString = urlParse(url).hash.replace('#', '')
-          const data = urlParse.qs.parse(queryString)
+
+          // get the hash value (via `match`), parse as query string
+          const data = qs.parse(url.match(/#(.*)/)[1])
+
           expect(data.access_token).toBeTruthy()
           expect(data.expires_in).toBeTruthy()
           expect(data.token_type).toBeTruthy()
-          expect(data.state).toEqual(requestState)
+          expect(data.state).toEqual(state)
           done()
         })
       })
@@ -76,7 +82,7 @@ describe('implicit flow', function() {
   describe('when client does not allow it', function() {
     let app, client, req
     beforeEach(function(done) {
-      Promise.resolve(buildAndSaveClient(state().collections, {
+      Promise.resolve(buildAndSaveClient(config.state.collections, {
         // implicitFlow: false
       })).then((savedClient) => {
         client = savedClient
@@ -84,7 +90,7 @@ describe('implicit flow', function() {
       })
     })
     describe('on correct authorization request', function() {
-      const requestState = Math.random().toString()
+      const state = 'some-state'
       beforeEach(function(done) {
         req = createRequest({
           query: {
@@ -92,11 +98,11 @@ describe('implicit flow', function() {
             client_id: client.key,
             redirect_uri: client.redirect_uris[0],
             scope: client.scope.join(','),
-            state: requestState
+            state: state
           }
         })
         req.client = client
-        req.state = state()
+        req.state = config.state
         app = express()
         app.use(oidc._authorize())
         done()

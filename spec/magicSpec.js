@@ -1,29 +1,29 @@
 "use strict";
 
-const debug = require('debug')('oauth2-oidc')
-
 describe('magic link', function() {
 
   let oidc, config, client, user
 
-  const state = () => oidc.options.state
-
   beforeEach(function(done) {
-    getState()
-    .then(state => new OAuth2OIDC({ state, login_url: '/login' }))
-    .then(o => {
-      oidc = o
-    }).then(() => buildAndSaveClient(state().collections, {}))
-    .then(savedClient => {
-      client = savedClient
-      return buildAndSaveUser(state().collections, {
-        password: 'secret123',
-        passConfirm: 'secret123'
+    oidc = new OAuth2OIDC({ state: {}, login_url: '/login', })
+    buildTestConfig().then((c) => {
+      config = c
+      oidc.options.state = config.state
+      Promise.resolve(buildAndSaveClient(config.state.collections, {})).then((savedClient) => {
+        client = savedClient
+        return buildAndSaveUser(config.state.collections)
+      }).then((savedUser) => {
+        user = savedUser
+        done()
       })
-    }).then(savedUser => {
-      user = savedUser
+    })
+  })
+
+  afterEach(function(done) {
+    config.state.connections.default._adapter.teardown(function(err) {
+      expect(err).toBeFalsy()
       done()
-    }).catch(err => { console.log('magic link, err', err); done(err) })
+    })
   })
 
   describe('client without "magiclink" scope', function() {
@@ -54,7 +54,7 @@ describe('magic link', function() {
         }
       })
       client.scope = [ 'magiclink' ]
-      state().collections.client.save(client).then(done)
+      client.save().then(done)
     })
     it('allows creation of magiclink', function(done) {
       const response = createResponse()
@@ -93,7 +93,7 @@ describe('magic link', function() {
         express().use(oidc.magicopen()).handle(openRequest, createResponse(), (err) => {
           expect(err).toBeFalsy()
           const secondResponse = createResponse()
-          debug('key consumed, key', key)
+          console.log('key consumed, key', key)
           express().use(oidc.magicopen()).handle(createRequest({
             query: {
               key: key
@@ -109,3 +109,4 @@ describe('magic link', function() {
   })
 
 })
+

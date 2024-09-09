@@ -30,7 +30,6 @@ class OAuth2OIDC {
   }
 
   _validateAuth(req, res, next) {
-    debug('_validateAuth', req.query)
     var errors = schemas.validate(req.query, schemas.authSchema).errors;
     if (!errors.length) {
       return next();
@@ -43,16 +42,15 @@ class OAuth2OIDC {
     const options = this.options
     return function(req, res, next) {
       const query = req.query
-      debug('_getClient, findOne', query.client_id)
-      req.state.collections.client.findOne({ key: query.client_id })
-      .then(client => {
+      req.state.collections.client.findOne({ key: query.client_id }, (err, client) => {
+        if (err) return res.status(409).send(`client with id ${ query.client_id } not found. err=${ err }`);
         if (!client) {
           return res.status(404).send(`client with id ${ query.client_id } not found.`)
         } else {
           req.client = client
           next()
         }
-      }).catch(err => res.status(409).send(`client with id ${ query.client_id } not found. err=${ err }`))
+      })
     }
   }
 
@@ -64,7 +62,6 @@ class OAuth2OIDC {
         return requested_redirect_uri.match(`^${ uri }`)
       }, false)
       if (permitted) {
-        debug('_verifyRedirectUri, permitted', req.client._id, requested_redirect_uri)
         next()
       } else {
         next({ status: 400, error: 'invalid_request', error_description: 'redirect_uri not permitted' })
@@ -93,11 +90,10 @@ class OAuth2OIDC {
     const options = this.options
 
     function createAuth(req, scopes, code, redirect_uri, response_type) {
-      debug('createAuth, user in session', req.session.user)
       return req.state.collections.auth.create({
-        clientId: req.client._id,
+        client: req.client.id,
         scope: scopes,
-        userId: req.state.convertStringToId(req.session.user),
+        user: req.session.user,
         code: code,
         redirectUri: redirect_uri,
         responseType: response_type,
@@ -119,7 +115,7 @@ class OAuth2OIDC {
           debug('_authorize, auth created', auth)
           return res.redirect(req.query.redirect_uri
             + uriQuerySeparator(req.query.redirect_uri) + 'code=' + encodeURIComponent(auth.code)
-            + '&state=' + encodeURIComponent(req.query.state))
+            + '&state=' + req.query.state)
         }).catch((err) => {
           debug('unable to authorize', err)
           next(err)
@@ -160,7 +156,7 @@ class OAuth2OIDC {
           if (req.client.refreshTokenOnImplicitFlow) {
             redirectUrl += '&refresh_token=' + encodeURIComponent(data.refresh_token)
           }
-          if (req.query.state) redirectUrl += ('&state=' + encodeURIComponent(req.query.state))
+          if (req.query.state) redirectUrl += ('&state=' + req.query.state)
           res.redirect(redirectUrl)
           next()
         }).catch((err) => {
@@ -266,31 +262,28 @@ class OAuth2OIDC {
           })
         })
       }).then((credentials) => {
-        return req.state.collections.client.findOne({ key: credentials.client_id })
-        .catch(err => {
-          const msg = `client with id ${ credentials.client_id } not found.`;
-          throw { status: 404, error: 'invalid_request', error_description: msg }
-        })
-        .then(client => {
-          if (!client) {
-            throw {
-              status: 404,
-              error: 'invalid_request',
-              error_description: `client with id ${ credentials.client_id } not found.`
+        return new Promise((resolve, reject) => {
+          req.state.collections.client.findOne({ key: credentials.client_id }, (err, client) => {
+            if (err) {
+              const msg = `client with id ${ credentials.client_id } not found.`;
+              return reject({ status: 404, error: 'invalid_request', error_description: msg })
             }
-          }
-          if (client.secret != credentials.secret) {
-            throw {
-              status: 401,
-              error: 'invalid_request',
-              error_description: `incorrect secret for client ${ credentials.client_id }`
+            if (!client) {
+              return reject({
+                status: 404,
+                error: 'invalid_request',
+                error_description: `client with id ${ credentials.client_id } not found.`
+              })
             }
-          }
-          return client
+            if (client.secret != credentials.secret) {
+              const msg = `incorrect secret for client ${ credentials.client_id }`
+              return reject({ status: 401, error: 'invalid_request', error_description: msg })
+            }
+            resolve(client)
+          })
         })
       }).then((client) => {
         req.client = client
-        debug('_getClientOnTokenRequest', client)
         next()
       }).catch((err) => {
         debug('err', err.stack)
@@ -306,9 +299,8 @@ class OAuth2OIDC {
       if (!req.body.code) {
         throw { status: 400, error: 'invalid_request', error_description: '"code" is required' }
       }
-      debug('_consumeClientCode, auth.findOne', req.client)
       return collections.auth.findOne({
-        clientId: req.client._id,
+        client: req.client.id,
         code: req.body.code,
         status: 'created'
       })
@@ -323,7 +315,7 @@ class OAuth2OIDC {
       }
       req.auth = auth
       auth.status = 'consumed'
-      return collections.auth.save(auth)
+      return auth.save()
     }).then(() => {
       debug('auth saved', req.auth)
       return Promise.resolve()
@@ -373,9 +365,9 @@ class OAuth2OIDC {
           debug('user2', user2)
           const code = generateCode()
           return req.state.collections.auth.create({
-            clientId: req.client._id,
+            client: req.client.id,
             scope: scope.split(' '),
-            userId: user._id,
+            user: user,
             code: code,
             redirectUri: redirect_uri,
             responseType: 'code',
@@ -410,7 +402,7 @@ class OAuth2OIDC {
           }
           req.auth = auth
           auth.status = 'consumed'
-          return req.state.collections.auth.save(auth)
+          return auth.save()
         }).then(() => {
           debug('magicopen, saved', arguments)
           next()
@@ -421,14 +413,11 @@ class OAuth2OIDC {
       },
       (req, res, next) => { // check expiry
         const auth = req.auth
-        req.state.collections.client.findOne(auth.clientId)
-        .then(client => {
-          req.client = client
-          if (this._expiresInSeconds(client, auth.createdAt) < 0) {
-            return next({ status: 401, error: 'key_invalid', error_description: 'key not found or expired' })
-          }
-          next()
-        })
+        const client = req.auth.client // TODO: may have to query
+        if (this._expiresInSeconds(client, auth.createdAt) < 0) {
+          return next({ status: 401, error: 'key_invalid', error_description: 'key not found or expired' })
+        }
+        next()
       },
       (req, res, next) => {
         Promise.resolve(req.state.collections.user.findOne({ id: req.auth.user })).then((user) => {
@@ -458,9 +447,9 @@ class OAuth2OIDC {
       token: generateCode(48),
       type: 'bearer',
       scope: auth.scope,
-      clientId: req.client._id,
-      userId: auth.userId,
-      authId: auth._id
+      client: req.client,
+      user: auth.user,
+      auth: auth
     })
   }
 
@@ -470,7 +459,7 @@ class OAuth2OIDC {
     return collections.refresh.create({
       token: generateCode(42),
       scope: auth.scope,
-      authId: auth._id,
+      auth: auth,
       status: 'created'
     })
   }
@@ -492,21 +481,20 @@ class OAuth2OIDC {
         })
       }
       req.token = token
-      return collections.auth.findOne({ _id: token.authId })
+      return collections.auth.findOne({ id: token.auth })
     }).then((auth) => {
       req.auth = auth
       const token = req.token
       const client = req.client
       debug('_invalidateRefreshToken, client and token and auth', req.client, token, auth)
-      debug('_invalidateRefreshToken, auth.clientId and client._id', auth.clientId, client._id)
-      if (!auth || auth.clientId.toString() != client._id.toString()) {
+      if (!auth || auth.client != client.id) {
         return Promise.reject({
           status: 401,
           error: 'invalid_token',
           error_description: 'refresh token does not belong to client' })
       }
       token.status = 'consumed'
-      return collections.refresh.save(token)
+      return token.save()
     })
   }
 
@@ -574,9 +562,9 @@ class OAuth2OIDC {
           this._userViaUsernameAndPassword(req.state.collections, req.body).then((user) => { // TODO: duplication from here
             req.user = user
             return req.state.collections.auth.create({
-              clientId: req.client._id,
+              client: req.client.id,
               scope: req.client.scope,
-              userId: req.user._id,
+              user: req.user,
               code: 'password',
               redirectUri: req.client.redirect_uris[0],
               responseType: 'bearer',
@@ -627,7 +615,7 @@ class OAuth2OIDC {
         }
         req.token = token
         debug('token found', token)
-        return collections.user.findOne({ _id: token.userId })
+        return collections.user.findOne({ id: token.user })
       }).then((user) => {
         if (!user) {
           debug('user of token not found', req.token)
@@ -718,11 +706,15 @@ class OAuth2OIDC {
           preferred_username: '(no preferred name set)'
         }
       }
-      Promise.resolve(f(req.user))
-      .then(userinfo => {
-        res.send(userinfo)
+      Promise.resolve(f(req.user, req))
+      .then(data => {
+        res.send(data)
         next()
-      }).catch(err => next(err))
+      })
+      .catch(err => {
+        debug('_sendUserInfo, err in userInfoFn', err)
+        next(err)
+      })
     }
   }
 
@@ -732,19 +724,20 @@ class OAuth2OIDC {
     const collections = req.state.collections
     const user = req.user
 
-    Promise.resolve().then(() => collections.auth.deleteMany({ userId: user._id }))
-    .then(r => {
-      debug(`_removeAccessAndAuth, destroyed auths for user ${ user._id }`, r)
-      return collections.access.deleteMany({ userId: user._id })
+    Promise.resolve().then(() => {
+      return collections.auth.destroy({ user: user.id })
     }).then((r) => {
-      debug(`_removeAccessAndAuth, destroyed access for user ${ user._id }`, r)
+      debug(`_removeAccessAndAuth, destroyed auths for user ${ user.id }`, r)
+      return collections.access.destroy({ user: user.id })
+    }).then((r) => {
+      debug(`_removeAccessAndAuth, destroyed access for user ${ user.id }`, r)
       next()
     }).catch((err) => {
-      debug(`_removeAccessAndAuth, unable to remove tokens for ${ user._id }`, err)
+      debug(`_removeAccessAndAuth, unable to remove tokens for ${ user.id }`, err)
       return next({
         status: 500,
         error: 'internal',
-        error_description: `unable to destroy tokens for user ${ user.sub }`
+        error_description: `unable to destroy tokens for user ${ user.id }`
       });
     })
 
@@ -772,4 +765,6 @@ class OAuth2OIDC {
 
 module.exports = OAuth2OIDC;
 
-module.exports.getStateBackedByMongoDB = (url) => require('./lib/persistence/mongo')(url);
+module.exports.state = {
+  defaultSpecifications: require('./lib/specifications')
+}
