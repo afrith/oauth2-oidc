@@ -1,5 +1,5 @@
 {
-  "name": "oauth2-oidc",
+  "name": "@adrianfrith/oauth2-oidc",
   "version": "0.1.35",
   "description": "Oauth2 and OpenIDConnect implementation, as express middleware",
   "main": "index.js",
