@@ -240,6 +240,11 @@ class OAuth2OIDC {
                 error_description: `client with id ${ req.body.client_id } not found.`
               })
             }
+
+            if (!client.enforceAuthOnTokenRequest) {
+              return resolve({ client_id: client.key, secret: client.secret })
+            }
+
             if ((client.passwordFlow && req.body.grant_type == 'password') ||
                 req.body.grant_type == 'refresh_token' ||
                 client.allowClientCredentialsInBody) {
@@ -250,12 +255,8 @@ class OAuth2OIDC {
                 return reject({ status: 401, error: 'invalid_request', error_description: 'invalid client credentials'})
               }
             }
-            if (client.enforceAuthOnTokenRequest) {
-              return reject(err)
-              // return reject({ status: 401, error: 'invalid_request', error_description: 'missing authorization header (2)' })
-            } else {
-              return resolve({ client_id: client.key, secret: client.secret })
-            }
+            
+            return reject(err)
           }).catch((err) => {
             debug('_getClientOnTokenRequest, err loading client via client_id', err)
             reject(err)
