@@ -81,6 +81,28 @@ class OAuth2OIDC {
     }
   }
 
+  _checkSuspendedUser() {
+    return (req, res, next) => {
+      req.state.collections.user.findOne({ id: req.session.user }).then((user) => {
+        debug('_checkSuspendedUser, user=', user)
+        if (user == null) {
+          return res.status(500).send({ status: 500, error: 'invalid_request', error_description: 'invalid session user' })
+        }
+        if (user.suspended === true) {
+          req.session.destroy((err) => {
+            if (err) {
+              debug('_checkSuspendedUser, unable to destroy session for suspended user', err)
+            }
+            // we don't care about the return_url because they are suspended
+            res.redirect(this.options.login_url)
+          })
+          return
+        }
+        return next()
+      })
+    }
+  }
+
   _getScopesFromQueryOrClient(req) {
     const query = req.query
     return query.scope && query.scope.length > 0 ? query.scope.split(' ') : req.client.scope
@@ -196,6 +218,7 @@ class OAuth2OIDC {
       this._getClient(),
       this._verifyRedirectUri(),
       this._redirectToLoginUnlessLoggedIn(),
+      this._checkSuspendedUser(),
       this._authorize()
     ];
   }
